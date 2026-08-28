@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Discover Pi models through the same verified manager runtime used for Pi workers, avoiding stale or incompatible `pi-peer` wrapper binaries; extend model catalog caches from five minutes to one day.
 - Restore and fully enforce `disabledHarnesses`: disabled harnesses are rejected for automatic and explicit routes, omitted from interactive selection and browsing, clearly marked unavailable by `capabilities`, and warned about when role presets remain pinned to them.
 
 - Keep successful and coalesced cleanup-run telemetry off the Pi terminal by default; detailed cleanup stderr output now follows the existing `AGENT_INTERCOM_ORCHESTRATOR_METRICS=1` opt-in, while durable cleanup diagnostics and error reporting remain active.

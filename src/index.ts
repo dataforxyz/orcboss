@@ -745,6 +745,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       .then((commit) => { if (commit.value) publishStatus(ctx, commit.state.workers); })
       .catch(() => undefined);
   });
+  // Model availability changes infrequently; cache catalog discovery for one day.
+  const MODEL_CATALOG_CACHE_MS = 24 * 60 * 60_000;
   const modelCache = new Map<Harness, { expiresAt: number; models: string[]; catalogAvailable: boolean }>();
   let openCodeModelInfoCache: { expiresAt: number; models: OpenCodeModelInfo[]; catalogAvailable: boolean } | undefined;
 
@@ -1431,16 +1433,16 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     const command = profileName ? config.profiles[profileName]?.command : "opencode";
     const executable = command ? resolveProfileCommand(command) : undefined;
     if (!executable) {
-      openCodeModelInfoCache = { expiresAt: Date.now() + 5 * 60_000, models: [], catalogAvailable: false };
+      openCodeModelInfoCache = { expiresAt: Date.now() + MODEL_CATALOG_CACHE_MS, models: [], catalogAvailable: false };
       return [];
     }
     const result = await runner.exec(executable, ["models", "--verbose"], { timeout: 30000 }).catch(() => undefined);
     if (!result || result.code !== 0) {
-      openCodeModelInfoCache = { expiresAt: Date.now() + 5 * 60_000, models: [], catalogAvailable: false };
+      openCodeModelInfoCache = { expiresAt: Date.now() + MODEL_CATALOG_CACHE_MS, models: [], catalogAvailable: false };
       return [];
     }
     const models = parseOpenCodeModelsVerbose(result.stdout);
-    openCodeModelInfoCache = { expiresAt: Date.now() + 5 * 60_000, models, catalogAvailable: true };
+    openCodeModelInfoCache = { expiresAt: Date.now() + MODEL_CATALOG_CACHE_MS, models, catalogAvailable: true };
     return structuredClone(models);
   };
 
@@ -1454,10 +1456,17 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       catalogAvailable = openCodeModelInfoCache?.catalogAvailable ?? false;
     } else {
       const piProfileName = config.defaultProfiles.pi;
-      const piCommand = piProfileName ? config.profiles[piProfileName]?.command : "pi";
-      const executable = piCommand ? resolveProfileCommand(piCommand) : undefined;
-      if (executable) {
-        const result = await runner.exec(executable, ["--list-models"], { timeout: 30000 }).catch(() => undefined);
+      const piProfile = piProfileName ? config.profiles[piProfileName] : undefined;
+      const piRuntime = piProfileName && piProfile?.harness === "pi"
+        ? await resolvePiRuntime({
+          profileName: piProfileName,
+          profile: piProfile,
+          configuredExecutable: resolveProfileCommand(piProfile.command),
+          builtInProfile: DEFAULT_CONFIG.profiles["pi-peer"],
+        })
+        : undefined;
+      if (piRuntime) {
+        const result = await runner.exec(piRuntime.command, [...piRuntime.args, "--list-models"], { timeout: 30000 }).catch(() => undefined);
         if (result?.code === 0) {
           catalogAvailable = true;
           for (const model of parsePiModels(result.stdout)) {
@@ -1470,7 +1479,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       }
     }
     const result = [...models].sort();
-    modelCache.set(harness, { expiresAt: Date.now() + 5 * 60_000, models: result, catalogAvailable });
+    modelCache.set(harness, { expiresAt: Date.now() + MODEL_CATALOG_CACHE_MS, models: result, catalogAvailable });
     return [...result];
   };
 

@@ -102,6 +102,7 @@ function preferredLocalWrapper(name: string): string {
 }
 
 export const DEFAULT_CONFIG: OrchestratorConfig = {
+  disabledHarnesses: [],
   defaultHarness: "pi",
   defaultProfiles: {
     pi: "pi-peer",
@@ -572,6 +573,7 @@ function mergeSafeConfig(value: unknown): OrchestratorConfig {
       if (role) roles[name] = { ...(roles[name] ?? {}), ...role };
     }
   }
+  const disabledHarnesses = mergeHarnessList(value.disabledHarnesses, DEFAULT_CONFIG.disabledHarnesses);
   const defaultHarness = isHarness(value.defaultHarness) ? value.defaultHarness : DEFAULT_CONFIG.defaultHarness;
   const defaultProfiles = mergeHarnessStrings(value.defaultProfiles, DEFAULT_CONFIG.defaultProfiles);
   const idleTimeoutMinutes = positiveNumber(value.idleTimeoutMinutes, DEFAULT_CONFIG.idleTimeoutMinutes);
@@ -580,6 +582,7 @@ function mergeSafeConfig(value: unknown): OrchestratorConfig {
     idleTimeoutMinutes,
   );
   return {
+    disabledHarnesses,
     defaultHarness,
     defaultProfiles,
     defaultModels: mergeHarnessStrings(value.defaultModels, DEFAULT_CONFIG.defaultModels),
@@ -793,8 +796,10 @@ export async function writeConfigDefaults(path: string, config: OrchestratorConf
   const supervision = {
     ...existingSupervision,
   };
+  delete existing.disabledHarnesses;
   await writeConfigValue(path, {
     ...existing,
+    ...(config.disabledHarnesses.length ? { disabledHarnesses: config.disabledHarnesses } : {}),
     defaultHarness: config.defaultHarness,
     defaultProfiles,
     defaultModels: config.defaultModels,

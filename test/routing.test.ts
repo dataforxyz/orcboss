@@ -116,6 +116,32 @@ test("OpenCode remains explicit-only and explicit overrides win", () => {
   assert.match(configuredAutomatic.candidates.find((candidate) => candidate.harness === "opencode")?.reasons.join(" ") ?? "", /explicit-only/);
 });
 
+test("disabled harnesses reject automatic and explicit routes", () => {
+  const disabled = ["codex"] as Harness[];
+  const automatic = resolveHarnessRoute({
+    role: "builder",
+    defaultHarness: "pi",
+    presetHarness: "codex",
+    routing: DEFAULT_CONFIG.routing,
+    disabledHarnesses: disabled,
+    availability: availability(),
+  });
+  const explicit = resolveHarnessRoute({
+    role: "custom",
+    defaultHarness: "pi",
+    routing: DEFAULT_CONFIG.routing,
+    disabledHarnesses: disabled,
+    availability: availability(),
+    explicitHarness: "codex",
+    explicitSource: "harness",
+  });
+  assert.equal(automatic.selected, "claude");
+  assert.match(automatic.candidates[0].reasons.join(" "), /disabled by configuration/);
+  assert.equal(explicit.selected, undefined);
+  assert.equal(explicit.candidates[0].eligible, false);
+  assert.match(explicit.reasons.join(" "), /disabled by configuration/);
+});
+
 test("configured routing preference outranks the legacy default fallback", () => {
   const decision = resolveHarnessRoute({
     role: "custom",

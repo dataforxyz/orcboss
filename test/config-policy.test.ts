@@ -19,6 +19,7 @@ test("Boss delegated-manager defaults are explicit and do not widen existing par
 
 test("policy config merges partial values without dropping typed defaults", () => {
   assert.equal(mergeConfig({}).routing.modelRouting.unmatchedHarness, null);
+  assert.deepEqual(mergeConfig({ disabledHarnesses: ["opencode", "opencode", "unknown"] }).disabledHarnesses, ["opencode"]);
   const config = mergeConfig({
     routing: {
       explicitOnly: [],
@@ -43,6 +44,22 @@ test("policy config merges partial values without dropping typed defaults", () =
   assert.deepEqual(config.routing.modelRouting.stripPrefixes.codex, ["private/"]);
   assert.equal(config.routing.fallback.preserveRoleInstructions, false);
   assert.deepEqual(config.supervision, {});
+});
+
+test("saving an empty disabled-harness list re-enables every harness", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "orchestrator-enable-harness-"));
+  const path = join(directory, "config.json");
+  try {
+    await writeFile(path, JSON.stringify({ disabledHarnesses: ["opencode"] }));
+    const config = await readConfig(path);
+    config.disabledHarnesses = [];
+    await writeConfigDefaults(path, config);
+    const raw = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(Object.hasOwn(raw, "disabledHarnesses"), false);
+    assert.deepEqual((await readConfig(path)).disabledHarnesses, []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("Boss preferences merge only baseline model and effort fields", () => {
@@ -104,6 +121,7 @@ test("default-policy writes preserve unknown config and round-trip policy deltas
       boss: { futureBossField: { keep: true } },
     }), { mode: 0o644 });
     const config = await readConfig(path);
+    config.disabledHarnesses = ["opencode"];
     config.routing.explicitOnly = [];
     config.routing.profilePreferences.codex = ["codex-minimal", "codex-safe"];
     config.routing.roleRequirements.builder = { requiresSubagents: true };
@@ -118,6 +136,7 @@ test("default-policy writes preserve unknown config and round-trip policy deltas
 
     const raw = JSON.parse(await readFile(path, "utf8"));
     assert.equal(raw.futureTopLevel, true);
+    assert.deepEqual(raw.disabledHarnesses, ["opencode"]);
     assert.deepEqual(raw.routing.futureRouting, { keep: true });
     assert.deepEqual(raw.routing.profilePreferences.futureHarness, ["keep"]);
     assert.equal(Object.hasOwn(raw.routing, "explicitOnly"), false);
@@ -141,6 +160,7 @@ test("default-policy writes preserve unknown config and round-trip policy deltas
     assert.equal((await stat(path)).mode & 0o777, 0o600);
 
     const roundTrip = await readConfig(path);
+    assert.deepEqual(roundTrip.disabledHarnesses, ["opencode"]);
     assert.deepEqual(roundTrip.routing.modelRouting, config.routing.modelRouting);
     assert.deepEqual(roundTrip.routing.profilePreferences, config.routing.profilePreferences);
     assert.deepEqual(roundTrip.routing.roleRequirements, config.routing.roleRequirements);

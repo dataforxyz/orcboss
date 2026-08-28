@@ -145,6 +145,8 @@ export interface RoutingRequest {
   role: string;
   defaultHarness: Harness;
   routing: RoutingConfig;
+  /** Root configuration deny-list, enforced for automatic and explicit routes. */
+  disabledHarnesses?: Harness[];
   availability: Partial<Record<Harness, HarnessAvailability>>;
   presetHarness?: Harness;
   explicitHarness?: Harness;
@@ -368,17 +370,19 @@ export function resolveHarnessRoute(request: RoutingRequest): RoutingDecision {
   const requiresSubagents = request.requiresSubagents === true;
   const requestedEffort = request.requestedEffort;
   if (request.explicitHarness) {
+    const disabled = new Set(request.disabledHarnesses ?? []);
     const availability = request.availability[request.explicitHarness];
     const source = request.explicitSource ?? "harness";
     const effectiveEffort = request.candidateEfforts?.[request.explicitHarness] ?? requestedEffort;
     const warnings = [
+      ...(disabled.has(request.explicitHarness) ? ["excluded because this harness is disabled by configuration"] : []),
       ...(!availability?.available ? availability?.reasons.map((reason) => `availability warning: ${reason}`) ?? ["availability warning: availability was not detected"] : availability.reasons),
       ...(requiresSubagents && !availability?.supportsSubagents ? ["capability warning: explicit harness does not support configured nested subagents"] : []),
       ...(effortReason(availability, effectiveEffort) ? [`capability warning: ${effortReason(availability, effectiveEffort)}`] : []),
     ];
     const reasons = [`explicit ${source} override selected ${request.explicitHarness}`, ...warnings];
     return {
-      selected: request.explicitHarness,
+      ...(disabled.has(request.explicitHarness) ? {} : { selected: request.explicitHarness }),
       automatic: false,
       explicitSource: source,
       role,
@@ -389,8 +393,8 @@ export function resolveHarnessRoute(request: RoutingRequest): RoutingDecision {
         harness: request.explicitHarness,
         rank: 1,
         source: `explicit ${source}`,
-        eligible: true,
-        selected: true,
+        eligible: !disabled.has(request.explicitHarness),
+        selected: !disabled.has(request.explicitHarness),
         reasons,
       }],
     };
@@ -418,12 +422,17 @@ export function resolveHarnessRoute(request: RoutingRequest): RoutingDecision {
   // OpenCode has no implicit Orc routing contract. Configuration may add other
   // explicit-only harnesses, but cannot remove this hard boundary.
   const explicitOnly = new Set<Harness>([...request.routing.explicitOnly, "opencode"]);
+  const disabled = new Set(request.disabledHarnesses ?? []);
   const candidates: RoutingCandidate[] = [];
   let selected: Harness | undefined;
   for (const [index, harness] of ordered.entries()) {
     const availability = request.availability[harness];
     const reasons: string[] = [`ranked by ${sourceFor(harness)}`];
     let eligible = true;
+    if (disabled.has(harness)) {
+      eligible = false;
+      reasons.push("excluded because this harness is disabled by configuration");
+    }
     if (explicitOnly.has(harness)) {
       eligible = false;
       reasons.push("excluded from automatic routing (explicit-only)");

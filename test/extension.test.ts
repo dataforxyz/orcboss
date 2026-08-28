@@ -2157,49 +2157,6 @@ test("extension registers discovery tools and interactive configuration commands
   }
 });
 
-test("explicit model catalog requests refresh stale Pi results", async () => {
-  const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-model-refresh-test-"));
-  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = agentDir;
-  try {
-    const lifecycle = new Map<string, (...args: any[]) => any>();
-    const tools = new Map<string, any>();
-    let catalogCalls = 0;
-    const pi: any = {
-      on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
-      events: { on() { return () => {}; }, emit() {} },
-      registerTool(tool: any) { tools.set(tool.name, tool); },
-      registerCommand() {},
-      async exec(_command: string, args: string[]) {
-        if (!args.includes("--list-models")) return commandResult();
-        catalogCalls += 1;
-        const fable = catalogCalls > 1 ? "claude    claude-fable-5              200K     64K      yes        yes\n" : "";
-        return { ...commandResult(), stdout: `Provider   Model                         Context  Max Out  Reasoning  Images\n${fable}` };
-      },
-    };
-    const ctx: any = {
-      cwd: process.cwd(), mode: "rpc", hasUI: false,
-      sessionManager: { getSessionId: () => "model-refresh-test", getSessionFile: () => undefined },
-      ui: { setStatus() {}, notify() {} },
-    };
-    const extensionUrl = new URL(`../src/index.ts?model-refresh-test=${Date.now()}`, import.meta.url);
-    const { default: extension } = await import(extensionUrl.href);
-    extension(pi);
-    await lifecycle.get("session_start")?.({}, ctx);
-    const fleet = tools.get("agent_fleet");
-    const first = await fleet.execute("models-first", { action: "models", harness: "pi" }, new AbortController().signal, () => {}, ctx);
-    const second = await fleet.execute("models-second", { action: "models", harness: "pi" }, new AbortController().signal, () => {}, ctx);
-    assert.doesNotMatch(first.content[0].text, /claude\/claude-fable-5/);
-    assert.match(second.content[0].text, /claude\/claude-fable-5/);
-    assert.equal(catalogCalls, 2);
-    await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
-  } finally {
-    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-    await rm(agentDir, { recursive: true, force: true });
-  }
-});
-
 test("agents-config selects enumerated provider/model identifiers instead of requiring model text", async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-model-picker-test-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;

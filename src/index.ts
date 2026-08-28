@@ -1423,8 +1423,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     return { ...result, checkpointRequests };
   };
 
-  const enumerateOpenCodeModelInfo = async (forceRefresh = false): Promise<OpenCodeModelInfo[]> => {
-    if (!forceRefresh && openCodeModelInfoCache && openCodeModelInfoCache.expiresAt > Date.now()) {
+  const enumerateOpenCodeModelInfo = async (): Promise<OpenCodeModelInfo[]> => {
+    if (openCodeModelInfoCache && openCodeModelInfoCache.expiresAt > Date.now()) {
       return structuredClone(openCodeModelInfoCache.models);
     }
     const profileName = config.defaultProfiles.opencode;
@@ -1444,13 +1444,13 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     return structuredClone(models);
   };
 
-  const enumerateModels = async (harness: Harness, forceRefresh = false): Promise<string[]> => {
+  const enumerateModels = async (harness: Harness): Promise<string[]> => {
     const cached = modelCache.get(harness);
-    if (!forceRefresh && cached && cached.expiresAt > Date.now()) return [...cached.models];
+    if (cached && cached.expiresAt > Date.now()) return [...cached.models];
     const models = new Set(configuredModels(config, harness));
     let catalogAvailable = false;
     if (harness === "opencode") {
-      for (const info of await enumerateOpenCodeModelInfo(forceRefresh)) models.add(info.id);
+      for (const info of await enumerateOpenCodeModelInfo()) models.add(info.id);
       catalogAvailable = openCodeModelInfoCache?.catalogAvailable ?? false;
     } else {
       const piProfileName = config.defaultProfiles.pi;
@@ -2410,20 +2410,20 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         const harness = params.harness && params.harness !== "auto" ? params.harness : config.defaultHarness;
         if (config.disabledHarnesses.includes(harness)) throw new Error(`${harness} is disabled by configuration`);
         if (harness === "opencode") {
-          const info = await enumerateOpenCodeModelInfo(true);
+          const info = await enumerateOpenCodeModelInfo();
           const text = info.length
             ? `opencode models:\n${info.map((model) => `${model.id}${model.variants.length ? ` [${model.variants.join(", ")}]` : " [no variants]"}`).join("\n")}`
             : "No opencode models could be enumerated.";
           return textResult(text, { harness, models: info.map((model) => model.id), modelInfo: info });
         }
-        const models = await enumerateModels(harness, true);
+        const models = await enumerateModels(harness);
         return textResult(models.length ? `${harness} models:\n${models.join("\n")}` : `No ${harness} models could be enumerated.`, { harness, models });
       }
 
       if (params.action === "variants") {
         if (config.disabledHarnesses.includes("opencode")) throw new Error("opencode is disabled by configuration");
         if (!params.model) throw new Error("variants requires model");
-        const info = (await enumerateOpenCodeModelInfo(true)).find((candidate) => candidate.id === params.model);
+        const info = (await enumerateOpenCodeModelInfo()).find((candidate) => candidate.id === params.model);
         if (!info) throw new Error(`OpenCode model not found: ${params.model}`);
         return textResult(info.variants.length ? `${info.id} variants:\n${info.variants.join("\n")}` : `${info.id} has no configured variants.`, { model: info.id, variants: info.variants });
       }
@@ -3203,9 +3203,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         ctx.ui.notify(`${harness} is disabled in ${configPath}. Re-enable it in /agents-config before browsing its models.`, "error");
         return;
       }
-      const models = await enumerateModels(harness, true);
+      const models = await enumerateModels(harness);
       const text = harness === "opencode"
-        ? (await enumerateOpenCodeModelInfo(true)).map((model) => `${model.id}${model.variants.length ? ` [${model.variants.join(", ")}]` : " [no variants]"}`).join("\n")
+        ? (await enumerateOpenCodeModelInfo()).map((model) => `${model.id}${model.variants.length ? ` [${model.variants.join(", ")}]` : " [no variants]"}`).join("\n")
         : models.join("\n");
       const display = text || `No ${harness} models could be enumerated.`;
       if (ctx.hasUI) await ctx.ui.editor(`${harness} models`, display);

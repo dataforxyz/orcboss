@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Refresh model catalogs for explicit `agent_fleet` model/variant requests and `/agents-models` rather than presenting a five-minute-old cached result; picker interactions remain cached.
 - Restore and fully enforce `disabledHarnesses`: disabled harnesses are rejected for automatic and explicit routes, omitted from interactive selection and browsing, clearly marked unavailable by `capabilities`, and warned about when role presets remain pinned to them.
 
 - Keep successful and coalesced cleanup-run telemetry off the Pi terminal by default; detailed cleanup stderr output now follows the existing `AGENT_INTERCOM_ORCHESTRATOR_METRICS=1` opt-in, while durable cleanup diagnostics and error reporting remain active.

@@ -1946,7 +1946,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       const profiles = matching.map(([name]) => name);
       const modes = [...new Set(matching.map(([, profile]) => profile.mode ?? "persistent"))];
         const detected = availability[harness];
-        return `${harness}: modes=${modes.join(",") || "(none)"} efforts=${HARNESS_EFFORTS[harness].join(",")} profiles=${profiles.join(",") || "(none)"} available=${detected.available} subagents=${detected.supportsSubagents}${detected.available ? "" : ` reason=${detected.reasons.join("; ")}`}`;
+        const disabled = config.disabledHarnesses.includes(harness);
+        return `${harness}: modes=${modes.join(",") || "(none)"} efforts=${HARNESS_EFFORTS[harness].join(",")} profiles=${profiles.join(",") || "(none)"} disabled=${disabled} available=${disabled ? false : detected.available} subagents=${detected.supportsSubagents}${disabled ? " reason=disabled by configuration" : detected.available ? "" : ` reason=${detected.reasons.join("; ")}`}`;
       }),
       `permissions: ${Object.keys(config.permissionProfiles).sort().join(",") || "(none)"}`,
       "visual/browser capture: unmodeled; verify browser tooling, executable availability, and artifact write access before assignment",
@@ -3302,6 +3303,13 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
             ctx.ui.notify(`Default harness '${draft.defaultHarness}' is disabled. Choose an enabled default first.`, "error");
             continue;
           }
+          const disabledRoles = Object.entries(draft.roles)
+            .filter(([, preset]) => preset.harness && draft.disabledHarnesses.includes(preset.harness))
+            .map(([role, preset]) => `${role} (${preset.harness})`);
+          if (disabledRoles.length && !(await ctx.ui.confirm(
+            "Disabled role presets",
+            `These role presets select disabled harnesses and will fail until changed:\n${disabledRoles.join("\n")}\n\nSave anyway?`,
+          ))) continue;
           await writeConfigDefaults(configPath, draft);
           config = draft;
           modelCache.clear();

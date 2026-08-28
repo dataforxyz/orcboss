@@ -46,6 +46,22 @@ test("policy config merges partial values without dropping typed defaults", () =
   assert.deepEqual(config.supervision, {});
 });
 
+test("saving an empty disabled-harness list re-enables every harness", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "orchestrator-enable-harness-"));
+  const path = join(directory, "config.json");
+  try {
+    await writeFile(path, JSON.stringify({ disabledHarnesses: ["opencode"] }));
+    const config = await readConfig(path);
+    config.disabledHarnesses = [];
+    await writeConfigDefaults(path, config);
+    const raw = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(Object.hasOwn(raw, "disabledHarnesses"), false);
+    assert.deepEqual((await readConfig(path)).disabledHarnesses, []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Boss preferences merge only baseline model and effort fields", () => {
   const config = mergeConfig({
     boss: {

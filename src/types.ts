@@ -192,6 +192,8 @@ export interface RoutingConfig {
 export type SupervisionConfig = Record<string, never>;
 
 export interface OrchestratorConfig {
+  /** Harnesses excluded from every route, including caller-selected overrides. */
+  disabledHarnesses: Harness[];
   defaultHarness: Harness;
   defaultProfiles: Partial<Record<Harness, string>>;
   defaultModels: Partial<Record<Harness, string>>;

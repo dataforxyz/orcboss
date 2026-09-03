@@ -209,6 +209,10 @@ export interface OrchestratorConfig {
   maxRuntime: string;
   stopTimeoutSeconds: number;
   idleTimeoutMinutes: number;
+  /** Silence duration before the manager requests a worker handoff/progress update. */
+  statusProbeMinutes: number;
+  statusProbeRetryMinutes: number;
+  statusProbeMaxAttempts: number;
   checkpointWarningMinutes: number;
   checkpointRetryMinutes: number;
   cleanupGraceMinutes: number;
@@ -295,6 +299,9 @@ export interface WorkerRecord {
   lastWorkerActivityAt?: number;
   /** Exact inbound worker Intercom activity after sender/owner verification. */
   lastAuthenticatedIntercomActivityAt?: number;
+  /** Durable early status-probe delivery state; manager messages never count as worker activity. */
+  statusProbeLastAttemptAt?: number;
+  statusProbeAttemptCount?: number;
   idleDeadlineAt?: number;
   checkpointRequestedAt?: number;
   checkpointLastAttemptAt?: number;

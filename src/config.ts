@@ -270,6 +270,9 @@ export const DEFAULT_CONFIG: OrchestratorConfig = {
   maxRuntime: "2h",
   stopTimeoutSeconds: 5,
   idleTimeoutMinutes: 60,
+  statusProbeMinutes: 10,
+  statusProbeRetryMinutes: 10,
+  statusProbeMaxAttempts: 2,
   checkpointWarningMinutes: 10,
   checkpointRetryMinutes: 5,
   cleanupGraceMinutes: 15,
@@ -581,6 +584,12 @@ function mergeSafeConfig(value: unknown): OrchestratorConfig {
     positiveNumber(value.checkpointWarningMinutes, DEFAULT_CONFIG.checkpointWarningMinutes),
     idleTimeoutMinutes,
   );
+  // Reserve one second before the final checkpoint window so probes never
+  // collide with the shutdown handoff message. Zero means no usable probe window.
+  const statusProbeMinutes = Math.min(
+    positiveNumber(value.statusProbeMinutes, DEFAULT_CONFIG.statusProbeMinutes),
+    Math.max(0, idleTimeoutMinutes - checkpointWarningMinutes - 1 / 60),
+  );
   return {
     disabledHarnesses,
     defaultHarness,
@@ -598,6 +607,9 @@ function mergeSafeConfig(value: unknown): OrchestratorConfig {
     maxRuntime: typeof value.maxRuntime === "string" && value.maxRuntime.trim() ? value.maxRuntime : DEFAULT_CONFIG.maxRuntime,
     stopTimeoutSeconds: positiveNumber(value.stopTimeoutSeconds, DEFAULT_CONFIG.stopTimeoutSeconds),
     idleTimeoutMinutes,
+    statusProbeMinutes,
+    statusProbeRetryMinutes: positiveNumber(value.statusProbeRetryMinutes, DEFAULT_CONFIG.statusProbeRetryMinutes),
+    statusProbeMaxAttempts: Math.max(1, Math.floor(positiveNumber(value.statusProbeMaxAttempts, DEFAULT_CONFIG.statusProbeMaxAttempts))),
     checkpointWarningMinutes,
     checkpointRetryMinutes: positiveNumber(value.checkpointRetryMinutes, DEFAULT_CONFIG.checkpointRetryMinutes),
     cleanupGraceMinutes: positiveNumber(value.cleanupGraceMinutes, DEFAULT_CONFIG.cleanupGraceMinutes),
@@ -814,6 +826,9 @@ export async function writeConfigDefaults(path: string, config: OrchestratorConf
     maxRuntime: config.maxRuntime,
     stopTimeoutSeconds: config.stopTimeoutSeconds,
     idleTimeoutMinutes: config.idleTimeoutMinutes,
+    statusProbeMinutes: config.statusProbeMinutes,
+    statusProbeRetryMinutes: config.statusProbeRetryMinutes,
+    statusProbeMaxAttempts: config.statusProbeMaxAttempts,
     checkpointWarningMinutes: config.checkpointWarningMinutes,
     checkpointRetryMinutes: config.checkpointRetryMinutes,
     cleanupGraceMinutes: config.cleanupGraceMinutes,

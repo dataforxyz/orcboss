@@ -326,6 +326,7 @@ test("heartbeat renewal is activity-gated, capped at the idle deadline, and requ
   const activeHeartbeatAt = createdAt + 20 * 60_000;
   const active = renewObservedWorkerLeases(state, [structuredClone(running), observedFailed], "session-a", DEFAULT_CONFIG, activeHeartbeatAt);
   assert.deepEqual(active.renewed.map((worker) => worker.id), ["running-worker"]);
+  assert.deepEqual(active.statusProbeRequested.map((worker) => worker.id), ["running-worker"]);
   assert.deepEqual(active.checkpointRequested, []);
   assert.equal(running.leaseExpiresAt, boundedLeaseExpiry(DEFAULT_CONFIG, createdAt, activeHeartbeatAt));
   assert.equal(failed.leaseExpiresAt, leaseExpiry(DEFAULT_CONFIG, createdAt));
@@ -333,6 +334,7 @@ test("heartbeat renewal is activity-gated, capped at the idle deadline, and requ
   const warningAt = workerIdleDeadline(DEFAULT_CONFIG, createdAt) - DEFAULT_CONFIG.checkpointWarningMinutes * 60_000;
   const warning = renewObservedWorkerLeases(state, [structuredClone(running)], "session-a", DEFAULT_CONFIG, warningAt);
   assert.equal(running.leaseExpiresAt, workerIdleDeadline(DEFAULT_CONFIG, createdAt));
+  assert.deepEqual(warning.statusProbeRequested, [], "the final checkpoint owns the warning boundary");
   assert.deepEqual(warning.checkpointRequested.map((worker) => worker.id), ["running-worker"]);
   const duplicate = renewObservedWorkerLeases(state, [structuredClone(running)], "session-a", DEFAULT_CONFIG, warningAt + 1_000);
   assert.deepEqual(duplicate.checkpointRequested, []);
@@ -341,6 +343,30 @@ test("heartbeat renewal is activity-gated, capped at the idle deadline, and requ
   assert.equal(running.checkpointAttemptCount, 2);
   const expired = renewObservedWorkerLeases(state, [structuredClone(running)], "session-a", DEFAULT_CONFIG, workerIdleDeadline(DEFAULT_CONFIG, createdAt) + 1);
   assert.deepEqual(expired.renewed, []);
+});
+
+test("heartbeat sends bounded silent-worker status probes without renewing activity", () => {
+  const createdAt = 1_000;
+  const config = { ...DEFAULT_CONFIG, statusProbeMinutes: 10, statusProbeRetryMinutes: 10, statusProbeMaxAttempts: 2 };
+  const worker = createSystemdRecord({
+    id: "silent-worker", runId: "silent-run", harness: "pi", role: "advisor", task: "test", cwd: "/tmp",
+    profile: "pi-peer", unit: "silent.service", managerSessionId: "session-a", config, now: createdAt,
+  });
+  worker.state = "ready";
+  const state = { version: 1 as const, workers: [worker] };
+
+  const first = renewObservedWorkerLeases(state, [structuredClone(worker)], "session-a", config, createdAt + 10 * 60_000);
+  assert.deepEqual(first.statusProbeRequested.map((candidate) => candidate.id), ["silent-worker"]);
+  assert.equal(worker.statusProbeAttemptCount, 1);
+  assert.equal(worker.lastWorkerActivityAt, createdAt, "a manager probe must not count as worker activity");
+
+  const early = renewObservedWorkerLeases(state, [structuredClone(worker)], "session-a", config, createdAt + 15 * 60_000);
+  assert.deepEqual(early.statusProbeRequested, []);
+  const retry = renewObservedWorkerLeases(state, [structuredClone(worker)], "session-a", config, createdAt + 20 * 60_000);
+  assert.deepEqual(retry.statusProbeRequested.map((candidate) => candidate.id), ["silent-worker"]);
+  assert.equal(worker.statusProbeAttemptCount, 2);
+  const exhausted = renewObservedWorkerLeases(state, [structuredClone(worker)], "session-a", config, createdAt + 30 * 60_000);
+  assert.deepEqual(exhausted.statusProbeRequested, []);
 });
 
 test("heartbeat leaves exact Boss pause-fenced lifecycle budgets untouched", () => {
@@ -392,6 +418,8 @@ test("manager-received worker Intercom activity resets the idle budget but manag
   });
   worker.state = "running";
   worker.checkpointRequestedAt = 2_000;
+  worker.statusProbeLastAttemptAt = 2_100;
+  worker.statusProbeAttemptCount = 1;
   const state = { version: 4 as const, generation: 0, workers: [worker as WorkerRecordV4], workerGenerations: [{ workerId: worker.id, generation: worker.workerGeneration! }] };
   recordWorkerActivity(worker, DEFAULT_CONFIG, 2_500);
   assert.equal(worker.lastAuthenticatedIntercomActivityAt, undefined, "manual renewal activity must not claim inbound Intercom evidence");
@@ -402,6 +430,8 @@ test("manager-received worker Intercom activity resets the idle budget but manag
   assert.equal(updated?.lastAuthenticatedIntercomActivityAt, 4_000);
   assert.equal(updated?.idleDeadlineAt, workerIdleDeadline(DEFAULT_CONFIG, 4_000));
   assert.equal(updated?.checkpointRequestedAt, undefined);
+  assert.equal(updated?.statusProbeLastAttemptAt, undefined);
+  assert.equal(updated?.statusProbeAttemptCount, undefined);
 });
 
 test("pause-protected inbound Intercom activity records communication without clobbering lifecycle fences", () => {
@@ -520,6 +550,9 @@ test("configuration merges profiles, defaults, and role presets without dropping
   const config = mergeConfig({
     leaseMinutes: 5,
     idleTimeoutMinutes: 90,
+    statusProbeMinutes: 15,
+    statusProbeRetryMinutes: 7,
+    statusProbeMaxAttempts: 3,
     checkpointWarningMinutes: 12,
     checkpointRetryMinutes: 4,
     cleanupGraceMinutes: 20,
@@ -559,6 +592,9 @@ test("configuration merges profiles, defaults, and role presets without dropping
   });
   assert.equal(config.leaseMinutes, 5);
   assert.equal(config.idleTimeoutMinutes, 90);
+  assert.equal(config.statusProbeMinutes, 15);
+  assert.equal(config.statusProbeRetryMinutes, 7);
+  assert.equal(config.statusProbeMaxAttempts, 3);
   assert.equal(config.checkpointWarningMinutes, 12);
   assert.equal(config.checkpointRetryMinutes, 4);
   assert.equal(config.cleanupGraceMinutes, 20);

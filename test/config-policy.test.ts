@@ -40,6 +40,7 @@ test("policy config merges partial values without dropping typed defaults", () =
   assert.deepEqual(config.routing.roleRequirements.invalid, {});
   assert.equal(config.routing.modelRouting.unmatchedHarness, "opencode");
   assert.equal(mergeConfig({ routing: { modelRouting: { unmatchedHarness: null } } }).routing.modelRouting.unmatchedHarness, null);
+  assert.equal(mergeConfig({ idleTimeoutMinutes: 60, checkpointWarningMinutes: 10, statusProbeMinutes: 55 }).statusProbeMinutes, 49 + 59 / 60, "status probes must finish before the final checkpoint window");
   assert.deepEqual(config.routing.modelRouting.rules, [{ harness: "codex", patterns: ["private/*"] }]);
   assert.deepEqual(config.routing.modelRouting.stripPrefixes.codex, ["private/"]);
   assert.equal(config.routing.fallback.preserveRoleInstructions, false);

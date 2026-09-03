@@ -302,6 +302,15 @@ function parseInboundActivitySender(payload: unknown): { id?: string; name?: str
   return id || name ? { ...(id ? { id } : {}), ...(name ? { name } : {}) } : undefined;
 }
 
+function statusProbeMessage(worker: WorkerRecord, config: OrchestratorConfig): string {
+  const attempt = worker.statusProbeAttemptCount ?? 1;
+  return [
+    `Status check ${attempt}/${config.statusProbeMaxAttempts} for ${worker.id}.`,
+    "If the assignment is complete, send your final handoff to the manager now. If you are still working, send concise progress and an ETA; if blocked, send the blocker.",
+    "This manager-initiated check does not renew your lease. Only your response records activity.",
+  ].join("\n");
+}
+
 function checkpointMessage(worker: WorkerRecord, config: OrchestratorConfig): string {
   return [
     `Lifecycle checkpoint requested for ${worker.id}.`,
@@ -517,6 +526,7 @@ export async function removeWorkerRuntimeAndRecord(
 
 export type LeaseHeartbeatResult = {
   renewed: WorkerRecord[];
+  statusProbeRequested: WorkerRecord[];
   checkpointRequested: WorkerRecord[];
   changed: boolean;
 };
@@ -533,6 +543,7 @@ export function renewObservedWorkerLeases(
     .filter((worker) => worker.managerSessionId === managerId && worker.owned && isLiveState(worker.state) && worker.stateReason !== "stop_in_progress")
     .map((worker) => `${worker.id}\u0000${worker.runId}`));
   const renewed: WorkerRecord[] = [];
+  const statusProbeRequested: WorkerRecord[] = [];
   const checkpointRequested: WorkerRecord[] = [];
   let changed = false;
   for (const worker of state.workers) {
@@ -552,6 +563,22 @@ export function renewObservedWorkerLeases(
       }
     }
     const warningAt = checkpointWarningAt(worker, config);
+    const statusProbeFirstAt = lastActivity + config.statusProbeMinutes * 60_000;
+    const statusProbeRetryAfter = config.statusProbeRetryMinutes * 60_000;
+    const statusProbeAttemptDue = worker.statusProbeLastAttemptAt === undefined
+      ? now >= statusProbeFirstAt
+      : now - worker.statusProbeLastAttemptAt >= statusProbeRetryAfter;
+    if (config.statusProbeMinutes > 0
+      && worker.intercomTarget
+      && now < (warningAt ?? worker.idleDeadlineAt!)
+      && (worker.statusProbeAttemptCount ?? 0) < config.statusProbeMaxAttempts
+      && statusProbeAttemptDue) {
+      worker.statusProbeLastAttemptAt = now;
+      worker.statusProbeAttemptCount = (worker.statusProbeAttemptCount ?? 0) + 1;
+      worker.updatedAt = now;
+      statusProbeRequested.push(structuredClone(worker));
+      changed = true;
+    }
     const retryAfter = config.checkpointRetryMinutes * 60_000;
     const checkpointAttemptDue = worker.checkpointLastAttemptAt === undefined || now - worker.checkpointLastAttemptAt >= retryAfter;
     if (warningAt !== undefined && now >= warningAt && now < worker.checkpointDeadlineAt! && checkpointAttemptDue) {
@@ -563,7 +590,7 @@ export function renewObservedWorkerLeases(
       changed = true;
     }
   }
-  return { renewed, checkpointRequested, changed };
+  return { renewed, statusProbeRequested, checkpointRequested, changed };
 }
 
 export function recordIntercomWorkerActivity(
@@ -583,7 +610,11 @@ export function recordIntercomWorkerActivity(
   });
   if (!worker) return undefined;
   const pauseProtected = pauseProtectedWorkerKeys.has(`${worker.id}\u0000${workerIncarnation(worker)}`);
-  if (!bossWorkerTimersSuspended(worker) && !pauseProtected) recordWorkerActivity(worker, config, now);
+  if (!bossWorkerTimersSuspended(worker) && !pauseProtected) {
+    recordWorkerActivity(worker, config, now);
+    delete worker.statusProbeLastAttemptAt;
+    delete worker.statusProbeAttemptCount;
+  }
   worker.lastAuthenticatedIntercomActivityAt = now;
   worker.updatedAt = now;
   return structuredClone(worker);
@@ -667,7 +698,7 @@ function formatConfig(config: OrchestratorConfig, configPath: string): string {
   lines.push(`routing model rules: ${config.routing.modelRouting.rules.map((rule) => `${rule.harness}=[${rule.patterns.join(",")}]`).join("; ") || "(none)"}`);
   lines.push(`routing model prefix stripping: ${HARNESSES.map((harness) => `${harness}=[${config.routing.modelRouting.stripPrefixes[harness]?.join(",") ?? ""}]`).join(" ")}`);
   lines.push(`routing preserve role instructions on fallback: ${config.routing.fallback.preserveRoleInstructions}`);
-  lines.push(`lease=${config.leaseMinutes}m idle=${config.idleTimeoutMinutes}m checkpoint-warning=${config.checkpointWarningMinutes}m retry=${config.checkpointRetryMinutes}m grace=${config.cleanupGraceMinutes}m heartbeat=${config.heartbeatSeconds}s max-runtime=${config.maxRuntime}`);
+  lines.push(`lease=${config.leaseMinutes}m idle=${config.idleTimeoutMinutes}m status-probe=${config.statusProbeMinutes}m/${config.statusProbeRetryMinutes}m×${config.statusProbeMaxAttempts} checkpoint-warning=${config.checkpointWarningMinutes}m retry=${config.checkpointRetryMinutes}m grace=${config.cleanupGraceMinutes}m heartbeat=${config.heartbeatSeconds}s max-runtime=${config.maxRuntime}`);
   lines.push(`cleanup: startup=${config.cleanupExpiredOnStart} shutdown=${config.cleanupOnShutdown} timer=${config.cleanupTimerEnabled ? `${config.cleanupTimerMinutes}m` : "disabled"} prune-stopped=${config.pruneStoppedWorkersOnCleanup}`);
   lines.push(`history: recent=${config.recentStoppedWorkerHours}h retention=${config.stoppedWorkerRetentionDays}d dirty-retention=${config.dirtyStoppedWorkerRetentionDays}d orphan-runtime-retention=${config.orphanRuntimeRetentionMinutes}m prune-caches-on-stop=${config.pruneRuntimeCachesOnStop}`);
   return lines.join("\n");
@@ -1409,7 +1440,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     const attached = workersAttachedToManager(snapshot.workers, sessionId);
     if (!attached.some((worker) => isLiveState(worker.state) || worker.state === "migration_pending")) {
       publishStatus(ctx, snapshot.workers);
-      return { renewed: [], checkpointRequested: [], changed: false, checkpointRequests: [] };
+      return { renewed: [], statusProbeRequested: [], checkpointRequested: [], changed: false, statusProbeRequests: [], checkpointRequests: [] };
     }
     const observedWorkers = await reconcile(sessionId, false);
     const pauseProtectedWorkerKeys = new Set(await trustedLocalBossStore.pauseProtectedWorkerKeys());
@@ -1419,13 +1450,19 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       return { value, changed: value.changed };
     });
     publishStatus(ctx, observedWorkers);
+    const statusProbeRequests = result.statusProbeRequested.flatMap((worker) => worker.intercomTarget ? [{
+      workerId: worker.id,
+      runId: worker.runId,
+      target: worker.intercomTarget,
+      message: statusProbeMessage(worker, config),
+    }] : []);
     const checkpointRequests = result.checkpointRequested.flatMap((worker) => worker.intercomTarget ? [{
       workerId: worker.id,
       runId: worker.runId,
       target: worker.intercomTarget,
       message: checkpointMessage(worker, config),
     }] : []);
-    return { ...result, checkpointRequests };
+    return { ...result, statusProbeRequests, checkpointRequests };
   };
 
   const enumerateOpenCodeModelInfo = async (): Promise<OpenCodeModelInfo[]> => {
@@ -1995,7 +2032,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
 
       if (params.action === "_heartbeat") {
         const result = await runLifecycleHeartbeat(ctx);
-        return textResult(`Lifecycle heartbeat: renewed=${result.renewed.length} checkpoint=${result.checkpointRequests.length}.`, result);
+        return textResult(`Lifecycle heartbeat: renewed=${result.renewed.length} status=${result.statusProbeRequests.length} checkpoint=${result.checkpointRequests.length}.`, result);
       }
 
       if (params.action === "spawn") {
@@ -3350,6 +3387,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         if (choice === "Lifecycle") {
           const lease = await ctx.ui.input("Lease minutes", String(draft.leaseMinutes));
           const idleTimeout = await ctx.ui.input("Idle timeout minutes", String(draft.idleTimeoutMinutes));
+          const statusProbe = await ctx.ui.input("Silent-worker status probe minutes", String(draft.statusProbeMinutes));
+          const statusProbeRetry = await ctx.ui.input("Silent-worker status probe retry minutes", String(draft.statusProbeRetryMinutes));
+          const statusProbeMaxAttempts = await ctx.ui.input("Maximum silent-worker status probes", String(draft.statusProbeMaxAttempts));
           const checkpointWarning = await ctx.ui.input("Checkpoint warning minutes before idle deadline", String(draft.checkpointWarningMinutes));
           const checkpointRetry = await ctx.ui.input("Checkpoint retry minutes", String(draft.checkpointRetryMinutes));
           const cleanupGrace = await ctx.ui.input("Cleanup grace minutes after idle deadline", String(draft.cleanupGraceMinutes));
@@ -3366,6 +3406,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           const cleanupChoice = await ctx.ui.select("Cleanup live owned workers on manager shutdown?", preferredFirst(["yes", "no"], draft.cleanupOnShutdown ? "yes" : "no"));
           if (lease && Number(lease) > 0) draft.leaseMinutes = Number(lease);
           if (idleTimeout && Number(idleTimeout) > 0) draft.idleTimeoutMinutes = Number(idleTimeout);
+          if (statusProbe && Number(statusProbe) > 0) draft.statusProbeMinutes = Number(statusProbe);
+          if (statusProbeRetry && Number(statusProbeRetry) > 0) draft.statusProbeRetryMinutes = Number(statusProbeRetry);
+          if (statusProbeMaxAttempts && Number(statusProbeMaxAttempts) > 0) draft.statusProbeMaxAttempts = Math.floor(Number(statusProbeMaxAttempts));
           if (checkpointWarning && Number(checkpointWarning) > 0) draft.checkpointWarningMinutes = Number(checkpointWarning);
           if (checkpointRetry && Number(checkpointRetry) > 0) draft.checkpointRetryMinutes = Number(checkpointRetry);
           if (cleanupGrace && Number(cleanupGrace) > 0) draft.cleanupGraceMinutes = Number(cleanupGrace);
@@ -3512,7 +3555,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           if (!currentCtx || initializedSessionId !== sessionId) return;
           await reconcileApplyingBossPauseControls();
           await synchronizeTrustedLocalBossWorkers();
-          for (const request of result.checkpointRequests) {
+          for (const request of [...result.statusProbeRequests, ...result.checkpointRequests]) {
             pi.events.emit(INTERCOM_LIFECYCLE_SEND_EVENT, {
               to: request.target,
               message: request.message,

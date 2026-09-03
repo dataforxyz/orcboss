@@ -34,6 +34,8 @@ import { isSafeModelPattern } from "./routing.ts";
 const CURRENT_VERSION = 4 as const;
 /** Older writers must fail closed instead of dropping suspend-accounting state. */
 export const SUSPEND_SAFE_LIFECYCLE_FEATURE = "suspend-safe-lifecycle-v1";
+/** Older writers must fail closed instead of dropping durable status-probe state. */
+export const SILENT_STATUS_PROBE_FEATURE = "silent-status-probe-v1";
 const MINIMUM_SUSPEND_DELTA_MS = 1_000;
 const BASELINE_SETTLE_MS = 60_000;
 // Keep this in lockstep with the explicit Boss cgroup-pause sentinel.
@@ -77,14 +79,14 @@ const V2_COMPAT_STORED_WORKER_KEYS = new Set([...V2_STORED_WORKER_KEYS, "lastAut
 const V2_COMPAT_API_WORKER_KEYS = new Set([...V2_API_WORKER_KEYS, "lastAuthenticatedIntercomActivityAt"]);
 const V3_STORED_WORKER_KEYS = new Set([...V2_STORED_WORKER_KEYS, "lastAuthenticatedIntercomActivityAt"]);
 const V3_API_WORKER_KEYS = new Set([...V3_STORED_WORKER_KEYS, "runId", "managerSessionId"]);
-const V4_STORED_WORKER_KEYS = new Set([...V3_STORED_WORKER_KEYS, "hierarchy", "delegationGrant"]);
+const V4_STORED_WORKER_KEYS = new Set([...V3_STORED_WORKER_KEYS, "hierarchy", "delegationGrant", "statusProbeLastAttemptAt", "statusProbeAttemptCount"]);
 const V4_API_WORKER_KEYS = new Set([...V4_STORED_WORKER_KEYS, "runId", "managerSessionId"]);
 const STRING_WORKER_KEYS = [
   "profile", "permissionProfile", "model", "instructions", "intercomTarget", "unit", "externalSessionId", "healthPath", "runtimeStatePath",
   "stopReason", "dirtyStatusAtStop", "dirtyCheckErrorAtStop", "lastError", "stateReason",
 ] as const;
 const NUMBER_WORKER_KEYS = [
-  "mainPid", "lastWorkerActivityAt", "lastAuthenticatedIntercomActivityAt", "idleDeadlineAt", "checkpointRequestedAt", "checkpointLastAttemptAt", "checkpointAttemptCount",
+  "mainPid", "lastWorkerActivityAt", "lastAuthenticatedIntercomActivityAt", "statusProbeLastAttemptAt", "statusProbeAttemptCount", "idleDeadlineAt", "checkpointRequestedAt", "checkpointLastAttemptAt", "checkpointAttemptCount",
   "checkpointDeadlineAt", "stopRequestedAt", "stoppedAt",
 ] as const;
 
@@ -543,7 +545,7 @@ function parseWorkerCommon(object: Record<string, unknown>, path: string): Omit<
     dirtyAtStop: optionalBoolean(object, "dirtyAtStop", path),
   };
   for (const key of STRING_WORKER_KEYS) output[key] = optionalString(object, key, path);
-  for (const key of NUMBER_WORKER_KEYS) output[key] = optionalNumber(object, key, path, key === "mainPid" || key === "checkpointAttemptCount", key === "mainPid" ? 1 : 0);
+  for (const key of NUMBER_WORKER_KEYS) output[key] = optionalNumber(object, key, path, key === "mainPid" || key === "checkpointAttemptCount" || key === "statusProbeAttemptCount", key === "mainPid" ? 1 : 0);
   if (object.backendDetails !== undefined) output.backendDetails = cloneJsonData(object.backendDetails, `${path}.backendDetails`);
   return compactObject(output) as Omit<WorkerRecord, "runId" | "state" | "managerSessionId">;
 }
@@ -1005,7 +1007,7 @@ export class WorkerStore {
     for (const feature of options.supportedFeatures ?? []) {
       if (typeof feature !== "string" || feature.length === 0) throw new TypeError("supportedFeatures must contain only non-empty strings");
     }
-    this.supportedFeatures = new Set([SUSPEND_SAFE_LIFECYCLE_FEATURE, ...(options.supportedFeatures ?? [])]);
+    this.supportedFeatures = new Set([SUSPEND_SAFE_LIFECYCLE_FEATURE, SILENT_STATUS_PROBE_FEATURE, ...(options.supportedFeatures ?? [])]);
   }
 
   private poisonPath(): string {
@@ -1858,6 +1860,9 @@ export class WorkerStore {
     let changed = false;
     for (const worker of timedWorkers) {
       const before = [worker.lastWorkerActivityAt, worker.idleDeadlineAt, worker.checkpointDeadlineAt, worker.checkpointLastAttemptAt, worker.leaseExpiresAt];
+      // Status probes are bounded manager-side nudges, not lifetime budgets:
+      // after wake or an explicit Boss thaw, an immediately due probe is safe
+      // and asks the worker to report rather than extending its lease.
       worker.lastWorkerActivityAt = shift(worker.lastWorkerActivityAt);
       worker.idleDeadlineAt = shift(worker.idleDeadlineAt);
       worker.checkpointDeadlineAt = shift(worker.checkpointDeadlineAt);
@@ -1872,6 +1877,10 @@ export class WorkerStore {
     state.lifecycleClock = this.lifecycleClockSample(state.lifecycleClock?.baselineOnly === true);
     if (!state.activeFeatures?.includes(SUSPEND_SAFE_LIFECYCLE_FEATURE)) {
       state.activeFeatures = [...(state.activeFeatures ?? []), SUSPEND_SAFE_LIFECYCLE_FEATURE];
+    }
+    if (state.workers.some((worker) => worker.statusProbeLastAttemptAt !== undefined || worker.statusProbeAttemptCount !== undefined)
+      && !state.activeFeatures.includes(SILENT_STATUS_PROBE_FEATURE)) {
+      state.activeFeatures = [...state.activeFeatures, SILENT_STATUS_PROBE_FEATURE];
     }
   }
 

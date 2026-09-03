@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { WorkerStore, WorkerStoreCorruptError } from "../src/store.ts";
+import { SILENT_STATUS_PROBE_FEATURE, WorkerStore, WorkerStoreCorruptError } from "../src/store.ts";
 
 function storedWorker(id: string, incarnation: string, hierarchy: Record<string, unknown>, extra: Record<string, unknown> = {}) {
   return {
@@ -60,6 +60,27 @@ test("v4 hierarchy and delegation authority survive strict read-mutate-read stor
     assert.deepEqual(after.workers[0].delegationGrant, grant);
     assert.deepEqual(after.workers[1].hierarchy, child.hierarchy);
     assert.equal(JSON.parse(await readFile(path, "utf8")).version, 4);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("durable silent-worker probes round-trip and fence older writers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-store-status-probe-"));
+  const path = join(root, "workers.json");
+  try {
+    const worker = storedWorker("silent", "inc-silent", { rootWorkerIncarnationId: "inc-silent", depth: 0 }, {
+      state: "ready",
+      statusProbeLastAttemptAt: 10,
+      statusProbeAttemptCount: 2,
+    });
+    await writeFile(path, JSON.stringify({ version: 4, generation: 1, workers: [worker], workerGenerations: [{ workerId: worker.id, generation: 1 }] }));
+    const store = new WorkerStore(path);
+    await store.mutate((state) => { state.workers[0].task = "status-probe-persisted"; });
+    const persisted = await new WorkerStore(path).read();
+    assert.equal(persisted.workers[0].statusProbeLastAttemptAt, 10);
+    assert.equal(persisted.workers[0].statusProbeAttemptCount, 2);
+    assert.ok(persisted.activeFeatures?.includes(SILENT_STATUS_PROBE_FEATURE));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

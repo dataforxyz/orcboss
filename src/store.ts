@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -20,6 +21,7 @@ import type {
   WorkerRecordV3,
   WorkerRecordV4,
   WorkerHierarchy,
+  WorkerLifecycleClock,
   WorkerState,
   WorkerStateFile,
   WorkerStateFileV2,
@@ -30,6 +32,12 @@ import { acquireKernelFileLock } from "./file-lock.ts";
 import { isSafeModelPattern } from "./routing.ts";
 
 const CURRENT_VERSION = 4 as const;
+/** Older writers must fail closed instead of dropping suspend-accounting state. */
+export const SUSPEND_SAFE_LIFECYCLE_FEATURE = "suspend-safe-lifecycle-v1";
+const MINIMUM_SUSPEND_DELTA_MS = 1_000;
+const BASELINE_SETTLE_MS = 60_000;
+// Keep this in lockstep with the explicit Boss cgroup-pause sentinel.
+const SUSPENDED_DEADLINE = 8_640_000_000_000_000 - 1;
 const DEFAULT_LEGACY_STOPPING_SETTLE_MS = 120_000;
 const LOCK_STALE_MS = 120_000;
 const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
@@ -113,6 +121,10 @@ export interface WorkerStoreOptions {
   legacyManagerContext?: ManagerOwnerKind;
   resolveLegacyManagerOwner?: (worker: Readonly<WorkerRecord>) => ManagerOwnerBinding;
   now?: () => number;
+  /** Linux CLOCK_MONOTONIC in whole milliseconds; inject in tests only. */
+  monotonicNow?: () => number;
+  /** Linux boot ID; inject in tests only. An unavailable ID disables cross-boot rebasing. */
+  bootId?: () => string | undefined;
   faultInjector?: (point: WorkerStoreFaultPoint, context: WorkerStoreFaultContext) => void | Promise<void>;
   lockTimeoutMs?: number;
   /** Optional content-free timing observations. Callback failures are ignored. */
@@ -703,6 +715,21 @@ function parseWorkerGenerations(value: unknown, required: boolean): WorkerGenera
   return entries;
 }
 
+function parseLifecycleClock(value: unknown): WorkerLifecycleClock | undefined {
+  if (value === undefined) return undefined;
+  const object = assertExactObject(value, new Set(["bootId", "baselineOnly", "wallAt", "monotonicAt"]), ["wallAt", "monotonicAt"], "worker state.lifecycleClock");
+  const bootId = optionalString(object, "bootId", "worker state.lifecycleClock");
+  if (bootId !== undefined && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(bootId)) {
+    throw new WorkerStoreValidationError("worker state.lifecycleClock.bootId must be a UUID when present");
+  }
+  return {
+    ...(bootId ? { bootId } : {}),
+    ...(optionalTrue(object, "baselineOnly", "worker state.lifecycleClock") ? { baselineOnly: true } : {}),
+    wallAt: requiredNumber(object, "wallAt", "worker state.lifecycleClock", true),
+    monotonicAt: requiredNumber(object, "monotonicAt", "worker state.lifecycleClock", true),
+  };
+}
+
 function parseFeatureList(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
   const features = assertDenseArray(value, "worker state.activeFeatures").map((feature, index) => {
@@ -717,7 +744,8 @@ function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersi
 function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersion: 3): WorkerStateFileV3;
 function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersion: 4): WorkerStateFileV4;
 function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersion: 2 | 3 | 4): WorkerStateFileV2 | WorkerStateFileV3 | WorkerStateFileV4 {
-  const object = assertExactObject(value, new Set(["version", "generation", "workers", "workerGenerations", "runtimeCleanupClaims", "activeFeatures"]), ["version", "generation", "workers", ...(allowAliases ? [] : ["workerGenerations"])], "worker state");
+  const allowed = new Set(["version", "generation", "workers", "workerGenerations", "runtimeCleanupClaims", "activeFeatures", ...(expectedVersion === 4 ? ["lifecycleClock"] : [])]);
+  const object = assertExactObject(value, allowed, ["version", "generation", "workers", ...(allowAliases ? [] : ["workerGenerations"])], "worker state");
   if (object.version !== expectedVersion) throw new WorkerStoreValidationError(`worker state version is not ${expectedVersion}`);
   const workers = assertDenseArray(object.workers, "worker state.workers").map((worker, index) => parseVersionedWorker(worker, `worker state.workers[${index}]`, allowAliases, expectedVersion));
   assertUniqueWorkers(workers);
@@ -725,6 +753,7 @@ function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersi
     ? undefined
     : assertDenseArray(object.runtimeCleanupClaims, "worker state.runtimeCleanupClaims").map((claim, index) => parseClaim(claim, `worker state.runtimeCleanupClaims[${index}]`));
   const activeFeatures = parseFeatureList(object.activeFeatures);
+  const lifecycleClock = expectedVersion === 4 ? parseLifecycleClock(object.lifecycleClock) : undefined;
   const workerGenerations = parseWorkerGenerations(object.workerGenerations, !allowAliases);
   for (const worker of workers) {
     const recorded = workerGenerations.find((entry) => entry.workerId === worker.id)?.generation;
@@ -739,6 +768,7 @@ function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersi
       ? workerGenerations
       : workers.map((worker) => ({ workerId: worker.id, generation: worker.workerGeneration })).sort((left, right) => left.workerId.localeCompare(right.workerId)),
     ...(claims ? { runtimeCleanupClaims: claims } : {}),
+    ...(lifecycleClock ? { lifecycleClock } : {}),
     ...(activeFeatures ? { activeFeatures } : {}),
   } as WorkerStateFileV2 | WorkerStateFileV3 | WorkerStateFileV4;
 }
@@ -882,6 +912,7 @@ function storedState(state: WorkerStateFileV4): Record<string, unknown> {
     workers: state.workers.map(storedWorker),
     workerGenerations: state.workerGenerations,
     runtimeCleanupClaims: state.runtimeCleanupClaims,
+    lifecycleClock: state.lifecycleClock,
     activeFeatures: state.activeFeatures,
   }) as Record<string, unknown>;
 }
@@ -902,6 +933,19 @@ function isProcessAlive(pid: number): boolean {
 
 function cloneState(state: WorkerStateFileV4): WorkerStateFileV4 {
   return structuredClone(state);
+}
+
+function monotonicMilliseconds(): number {
+  return Number(process.hrtime.bigint() / 1_000_000n);
+}
+
+function linuxBootId(): string | undefined {
+  try {
+    const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    return /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(bootId) ? bootId : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function workerIdentity(worker: WorkerRecord): string {
@@ -932,7 +976,7 @@ interface HeldWriteContext {
 export class WorkerStore {
   private queue: Promise<unknown> = Promise.resolve();
   private poisoned?: WorkerStoreQuarantine;
-  private readonly options: Required<Pick<WorkerStoreOptions, "legacyStoppingSettleMs" | "legacyManagerContext" | "now" | "lockTimeoutMs">> & WorkerStoreOptions;
+  private readonly options: Required<Pick<WorkerStoreOptions, "legacyStoppingSettleMs" | "legacyManagerContext" | "now" | "monotonicNow" | "bootId" | "lockTimeoutMs">> & WorkerStoreOptions;
   private readonly supportedFeatures: Set<string>;
   readonly path: string;
 
@@ -943,6 +987,8 @@ export class WorkerStore {
       legacyStoppingSettleMs: options.legacyStoppingSettleMs ?? DEFAULT_LEGACY_STOPPING_SETTLE_MS,
       legacyManagerContext: options.legacyManagerContext ?? "pi",
       now: options.now ?? Date.now,
+      monotonicNow: options.monotonicNow ?? monotonicMilliseconds,
+      bootId: options.bootId ?? linuxBootId,
       lockTimeoutMs: options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS,
     };
     if (!Number.isSafeInteger(this.options.legacyStoppingSettleMs) || this.options.legacyStoppingSettleMs < 0) {
@@ -951,11 +997,15 @@ export class WorkerStore {
     if (!Number.isSafeInteger(this.options.lockTimeoutMs) || this.options.lockTimeoutMs < 1) {
       throw new TypeError("lockTimeoutMs must be a positive safe integer");
     }
+    const initialMonotonic = this.options.monotonicNow();
+    if (!Number.isSafeInteger(initialMonotonic) || initialMonotonic < 0) {
+      throw new TypeError("monotonicNow must return a non-negative safe integer");
+    }
     if (!MANAGER_CONTEXTS.has(this.options.legacyManagerContext)) throw new TypeError("legacyManagerContext must be pi, opencode, or headless_cli");
     for (const feature of options.supportedFeatures ?? []) {
       if (typeof feature !== "string" || feature.length === 0) throw new TypeError("supportedFeatures must contain only non-empty strings");
     }
-    this.supportedFeatures = new Set(options.supportedFeatures ?? []);
+    this.supportedFeatures = new Set([SUSPEND_SAFE_LIFECYCLE_FEATURE, ...(options.supportedFeatures ?? [])]);
   }
 
   private poisonPath(): string {
@@ -1580,7 +1630,7 @@ export class WorkerStore {
       if (previous.activeFeatures) migrated.activeFeatures = structuredClone(previous.activeFeatures);
       return migrateV3File(migrated);
     }
-    const object = assertExactObject(state, new Set(["version", "generation", "workers", "workerGenerations", "runtimeCleanupClaims", "activeFeatures"]), ["version", "generation", "workers"], "worker state");
+    const object = assertExactObject(state, new Set(["version", "generation", "workers", "workerGenerations", "runtimeCleanupClaims", "lifecycleClock", "activeFeatures"]), ["version", "generation", "workers"], "worker state");
     if (object.version !== 2 && object.version !== 3 && object.version !== 4) throw new WorkerStoreValidationError(`worker state version must be 1, 2, 3, or 4`);
     const sourceVersion = object.version;
     const generation = requiredNumber(object, "generation", "worker state", true);
@@ -1601,6 +1651,7 @@ export class WorkerStore {
       ? undefined
       : assertDenseArray(object.runtimeCleanupClaims, "worker state.runtimeCleanupClaims").map((claim, index) => parseClaim(claim, `worker state.runtimeCleanupClaims[${index}]`));
     const activeFeatures = parseFeatureList(object.activeFeatures);
+    const lifecycleClock = sourceVersion === 4 ? parseLifecycleClock(object.lifecycleClock) : undefined;
     const nextGenerationById = new Map(previous.workerGenerations.map((entry) => [entry.workerId, entry.generation]));
     for (const worker of workers) nextGenerationById.set(worker.id, Math.max(nextGenerationById.get(worker.id) ?? 0, worker.workerGeneration));
     const normalized: WorkerStateFileV4 = {
@@ -1609,6 +1660,7 @@ export class WorkerStore {
       workers,
       workerGenerations: [...nextGenerationById].map(([workerId, workerGeneration]) => ({ workerId, generation: workerGeneration })).sort((left, right) => left.workerId.localeCompare(right.workerId)),
       ...(claims ? { runtimeCleanupClaims: claims } : {}),
+      ...(lifecycleClock ? { lifecycleClock } : {}),
       ...(activeFeatures ? { activeFeatures } : {}),
     };
     this.assertSupportedFeatures(normalized);
@@ -1756,7 +1808,75 @@ export class WorkerStore {
     }
   }
 
+  /**
+   * Rebase only worker-lifecycle deadlines by the wall time that elapsed while
+   * Linux CLOCK_MONOTONIC was stopped. This keeps real work time bounded while
+   * excluding laptop suspend; terminal retention and audit timestamps continue
+   * to use wall time.
+   */
+  private lifecycleClockSample(baselineOnly = false): WorkerLifecycleClock {
+    const wallAt = this.options.now();
+    const monotonicAt = this.options.monotonicNow();
+    if (!Number.isSafeInteger(wallAt) || wallAt < 0) throw new WorkerStoreValidationError("worker lifecycle wall clock must be a non-negative safe integer");
+    if (!Number.isSafeInteger(monotonicAt) || monotonicAt < 0) throw new WorkerStoreValidationError("worker lifecycle monotonic clock must be a non-negative safe integer");
+    const bootId = this.options.bootId();
+    if (bootId !== undefined && (typeof bootId !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(bootId))) {
+      throw new WorkerStoreValidationError("worker lifecycle boot ID must be a UUID when available");
+    }
+    return { ...(bootId ? { bootId } : {}), ...(baselineOnly ? { baselineOnly: true as const } : {}), wallAt, monotonicAt };
+  }
+
+  private rebaseLifecycleTimersAfterSuspend(state: WorkerStateFileV4): boolean {
+    const current = this.lifecycleClockSample();
+    const previous = state.lifecycleClock;
+    const timedWorkers = state.workers.filter((worker) => worker.owned
+      && worker.leaseExpiresAt < SUSPENDED_DEADLINE
+      && worker.stateReason !== "stop_in_progress"
+      && !["migration_pending", "failed", "lost", "stopped"].includes(worker.state));
+    // Empty and terminal-only registries preserve conditional no-op behavior.
+    if (timedWorkers.length === 0) return false;
+    // CLOCK_MONOTONIC is only comparable across processes in the same Linux
+    // boot. Missing legacy data and a reboot establish a fresh baseline rather
+    // than inventing elapsed active time. The pending baseline makes the first
+    // cleanup pass observational, preventing an upgrade/reboot from turning an
+    // unknown elapsed interval into an immediate worker stop.
+    if (!previous || !previous.bootId || previous.bootId !== current.bootId || current.wallAt < previous.wallAt || current.monotonicAt < previous.monotonicAt) {
+      state.lifecycleClock = this.lifecycleClockSample(true);
+      return true;
+    }
+    if (previous.baselineOnly) {
+      if (current.monotonicAt - previous.monotonicAt < BASELINE_SETTLE_MS) return false;
+      state.lifecycleClock = current;
+      return true;
+    }
+    const suspendedMs = (current.wallAt - previous.wallAt) - (current.monotonicAt - previous.monotonicAt);
+    if (suspendedMs < MINIMUM_SUSPEND_DELTA_MS) return false;
+    const shift = (value: number | undefined): number | undefined => {
+      if (value === undefined || value >= SUSPENDED_DEADLINE) return value;
+      return Math.min(SUSPENDED_DEADLINE - 1, value + suspendedMs);
+    };
+    let changed = false;
+    for (const worker of timedWorkers) {
+      const before = [worker.lastWorkerActivityAt, worker.idleDeadlineAt, worker.checkpointDeadlineAt, worker.checkpointLastAttemptAt, worker.leaseExpiresAt];
+      worker.lastWorkerActivityAt = shift(worker.lastWorkerActivityAt);
+      worker.idleDeadlineAt = shift(worker.idleDeadlineAt);
+      worker.checkpointDeadlineAt = shift(worker.checkpointDeadlineAt);
+      worker.checkpointLastAttemptAt = shift(worker.checkpointLastAttemptAt);
+      worker.leaseExpiresAt = shift(worker.leaseExpiresAt)!;
+      if (before.some((value, index) => value !== [worker.lastWorkerActivityAt, worker.idleDeadlineAt, worker.checkpointDeadlineAt, worker.checkpointLastAttemptAt, worker.leaseExpiresAt][index])) changed = true;
+    }
+    return changed;
+  }
+
+  private stampLifecycleClock(state: WorkerStateFileV4): void {
+    state.lifecycleClock = this.lifecycleClockSample(state.lifecycleClock?.baselineOnly === true);
+    if (!state.activeFeatures?.includes(SUSPEND_SAFE_LIFECYCLE_FEATURE)) {
+      state.activeFeatures = [...(state.activeFeatures ?? []), SUSPEND_SAFE_LIFECYCLE_FEATURE];
+    }
+  }
+
   private async writeLocked(state: WorkerStateFile, context: HeldWriteContext): Promise<void> {
+    if (state.version === 4) this.stampLifecycleClock(state as WorkerStateFileV4);
     const previous = context.loaded.state;
     if ((state.version === 2 || state.version === 3 || state.version === 4) && state.generation !== previous.generation) {
       throw new WorkerStoreConflictError(state.generation ?? -1, previous.generation);
@@ -1876,9 +1996,10 @@ export class WorkerStore {
         }
         const state = cloneState(loaded.state);
         const context: HeldWriteContext = { loaded, allowPendingResolution: false };
+        const changed = this.rebaseLifecycleTimersAfterSuspend(state);
         const result = await fn(state);
-        if (result.changed) await this.writeLocked(state, context);
-        this.metric("mutation", startedAt, result.changed ? "ok" : "noop");
+        if (result.changed || changed) await this.writeLocked(state, context);
+        this.metric("mutation", startedAt, result.changed || changed ? "ok" : "noop");
         return { value: result.value, generation: context.loaded.state.generation, state: cloneState(context.loaded.state) };
       }).catch((error) => {
         this.metric("mutation", startedAt, "error");
@@ -1900,6 +2021,7 @@ export class WorkerStore {
     return this.enqueue(() => this.withLock(async () => {
       const loaded = await this.loadLocked();
       const state = cloneState(loaded.state);
+      this.rebaseLifecycleTimersAfterSuspend(state);
       const context: HeldWriteContext = { loaded, allowPendingResolution: false };
       let persisting = false;
       const persist = async (): Promise<void> => {
@@ -1927,6 +2049,9 @@ export class WorkerStore {
         throw new WorkerStoreConflictError(options.expectedGeneration, loaded.state.generation);
       }
       const state = cloneState(loaded.state);
+      // This direct reconciliation may be the first writer after resume; it
+      // must not stamp away the suspend interval before normal cleanup sees it.
+      this.rebaseLifecycleTimersAfterSuspend(state);
       const worker = state.workers.find((candidate) => candidate.id === workerId);
       if (!worker || worker.state !== "migration_pending" || worker.migrationAudit?.originalState !== "stopping") {
         throw new WorkerStoreValidationError(`Worker ${workerId} is not pending legacy stopping reconciliation`);

@@ -1208,7 +1208,10 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     });
     const migrated = lifecycleCommit.state;
     const claimedIds = new Set((migrated.runtimeCleanupClaims ?? []).map((claim) => claim.workerId));
-    const liveCandidates = migrated.workers.flatMap((worker) => {
+    // A newly established/rebooted lifecycle clock has no trustworthy prior
+    // active-time sample. Observe one pass before using wall-clock deadlines.
+    const lifecycleBaselinePending = migrated.lifecycleClock?.baselineOnly === true;
+    const liveCandidates = lifecycleBaselinePending ? [] : migrated.workers.flatMap((worker) => {
       if (bossWorkerTimersSuspended(worker) || pauseProtectedWorkerKeys.has(`${worker.id}\u0000${workerIncarnation(worker)}`)) return [];
       const reason = cleanupReason(worker, now);
       return reason ? [{ worker, reason, kind: "stop" as const }] : [];

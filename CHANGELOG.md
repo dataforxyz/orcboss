@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve persistent worker lifecycle budgets across laptop suspend by comparing persisted wall-clock and Linux monotonic-clock samples, rebasing only live-worker idle, lease, and checkpoint timers after wake while leaving terminal retention on wall time.
 - Discover Pi models through the same verified manager runtime used for Pi workers, avoiding stale or incompatible `pi-peer` wrapper binaries; extend model catalog caches from five minutes to one day.
 - Restore and fully enforce `disabledHarnesses`: disabled harnesses are rejected for automatic and explicit routes, omitted from interactive selection and browsing, clearly marked unavailable by `capabilities`, and warned about when role presets remain pinned to them.
 

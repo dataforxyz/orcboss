@@ -355,6 +355,16 @@ export interface WorkerGenerationLedgerEntry {
   generation: number;
 }
 
+/** A Linux CLOCK_MONOTONIC / wall-clock sample used to exclude system suspend from worker lifetime budgets. */
+export interface WorkerLifecycleClock {
+  /** Linux boot identity; a changed or unavailable value disables cross-boot rebasing. */
+  bootId?: string;
+  /** A first-seen or cross-boot clock sample defers automatic expiry once. */
+  baselineOnly?: true;
+  wallAt: number;
+  monotonicAt: number;
+}
+
 export interface WorkerStateFile {
   /** Versions 1 and 2 are accepted only as compatibility inputs and explicit migration sources. */
   version: 1 | 2 | 3 | 4;
@@ -364,6 +374,8 @@ export interface WorkerStateFile {
   /** Durable anti-reuse ledger. Version 2 and canonical version 3 snapshots always include it. */
   workerGenerations?: WorkerGenerationLedgerEntry[];
   runtimeCleanupClaims?: RuntimeCleanupClaim[];
+  /** Last durable wall-clock and CLOCK_MONOTONIC sample for suspend-safe lifecycle accounting. */
+  lifecycleClock?: WorkerLifecycleClock;
   /** Active schema features; an unsupported feature prevents reads and mutations. */
   activeFeatures?: string[];
 }

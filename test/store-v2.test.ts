@@ -236,6 +236,48 @@ test("WorkerStore migrates the briefly shipped v2 timestamp as an untrusted comp
   }
 });
 
+test("legacy stopping reconciliation rebases live lifecycle deadlines before stamping a post-suspend clock", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-store-suspend-reconcile-"));
+  const path = join(root, "workers.json");
+  let wallAt = 1_000;
+  let monotonicAt = 5_000;
+  try {
+    await writeFile(path, JSON.stringify({ version: 1, workers: [
+      {
+        ...legacyWorker("live", "running"),
+        leaseExpiresAt: 111_000,
+        lastWorkerActivityAt: 1_000,
+        idleDeadlineAt: 121_000,
+        checkpointDeadlineAt: 131_000,
+        checkpointLastAttemptAt: 500,
+      },
+      legacyWorker("pending", "stopping"),
+    ] }));
+    const store = new WorkerStore(path, {
+      now: () => wallAt,
+      monotonicNow: () => monotonicAt,
+      bootId: () => "00000000-0000-0000-0000-000000000001",
+    });
+    await store.migrate();
+    await store.mutateConditionally(() => ({ value: undefined, changed: false }));
+    wallAt += 60_000;
+    monotonicAt += 60_000;
+    await store.mutateConditionally(() => ({ value: undefined, changed: false }));
+
+    wallAt += 3_601_000;
+    monotonicAt += 1_000;
+    const reconciled = await store.reconcileLegacyStopping("pending", "stopped", { observedAt: wallAt });
+    const live = reconciled.workers.find((worker) => worker.id === "live")!;
+    assert.equal(live.lastWorkerActivityAt, 3_601_000);
+    assert.equal(live.leaseExpiresAt, 3_711_000);
+    assert.equal(live.idleDeadlineAt, 3_721_000);
+    assert.equal(live.checkpointDeadlineAt, 3_731_000);
+    assert.equal(live.checkpointLastAttemptAt, 3_600_500);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("legacy stopping is read-only and only bounded explicit reconciliation can settle it", async () => {
   const root = await mkdtemp(join(tmpdir(), "worker-store-v2-stopping-"));
   const path = join(root, "workers.json");

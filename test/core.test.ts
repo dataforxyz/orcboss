@@ -91,6 +91,13 @@ test("harness launch args include identity or the initial task", () => {
   assert.ok(claudeArgs.includes("--effort"));
   assert.ok(claudeArgs.includes("worker-b"));
   assert.match(minimalClaudeArgs.join(" "), /final response to each wake/);
+  assert.match(minimalClaudeArgs.join(" "), /one final handoff/);
+  assert.match(minimalClaudeArgs.join(" "), /On a routine status or lifecycle wake/);
+  assert.match(minimalClaudeArgs.join(" "), /still counts as worker activity/);
+  assert.match(minimalClaudeArgs.join(" "), /cannot make an unchanged wake response silent/);
+  assert.match(minimalClaudeArgs.join(" "), /one-line no-change status/);
+  assert.match(minimalClaudeArgs.join(" "), /still relayed as activity/);
+  assert.match(minimalClaudeArgs.join(" "), /manager owns stopping workers/);
   assert.doesNotMatch(minimalClaudeArgs.join(" "), /Use intercom_send for progress/);
   assert.equal(trustedClaudeArgs.includes("--safe"), false);
   assert.ok(trustedClaudeArgs.includes("worker-trusted"));

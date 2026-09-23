@@ -194,6 +194,11 @@ test("internal manager heartbeat returns checkpoint requests without exposing a 
       state: "running", owned: true, managerSessionId: "opencode-manager-test", intercomTarget: "checkpoint-worker",
       createdAt: lastActivity, updatedAt: lastActivity, leaseExpiresAt: now + 5 * 60_000,
       lastWorkerActivityAt: lastActivity, idleDeadlineAt: lastActivity + 60 * 60_000, checkpointDeadlineAt: lastActivity + 75 * 60_000,
+    }, {
+      id: "probe-worker", runId: "probe-run", harness: "pi", backend: "systemd", role: "advisor", task: "quiet", cwd: "/tmp",
+      state: "running", owned: true, managerSessionId: "opencode-manager-test", intercomTarget: "probe-worker",
+      createdAt: now - 20 * 60_000, updatedAt: now - 20 * 60_000, leaseExpiresAt: now + 40 * 60_000,
+      lastWorkerActivityAt: now - 20 * 60_000, idleDeadlineAt: now + 40 * 60_000, checkpointDeadlineAt: now + 55 * 60_000,
     }] }));
     const cli = new URL("../src/agent-fleet-cli.mjs", import.meta.url);
     const { code, stdout, stderr } = await runChild(cli, {
@@ -213,6 +218,14 @@ test("internal manager heartbeat returns checkpoint requests without exposing a 
     assert.equal(response.result.details.checkpointRequests.length, 1);
     assert.equal(response.result.details.checkpointRequests[0].target, "checkpoint-worker");
     assert.match(response.result.details.checkpointRequests[0].message, /Lifecycle checkpoint requested/);
+    assert.match(response.result.details.checkpointRequests[0].message, /send a final handoff for the current assignment/);
+    assert.match(response.result.details.checkpointRequests[0].message, /if one has not already been sent or if material status has changed/);
+    assert.match(response.result.details.checkpointRequests[0].message, /nothing has materially changed, do not repeat it/);
+    assert.equal(response.result.details.statusProbeRequests.length, 1);
+    assert.match(response.result.details.statusProbeRequests[0].message, /If the assignment is complete and you have not already sent a final handoff/);
+    assert.match(response.result.details.statusProbeRequests[0].message, /nothing has materially changed, do not repeat its contents/);
+    assert.match(response.result.details.statusProbeRequests[0].message, /If material status changed or you received a new assignment, send an updated handoff/);
+    assert.match(response.result.details.statusProbeRequests[0].message, /reply to this manager-initiated check records worker activity/);
   } finally {
     await rm(agentDir, { recursive: true, force: true });
   }

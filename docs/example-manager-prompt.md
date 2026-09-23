@@ -288,7 +288,7 @@ filed issue fully captures the remaining work without exposing private data.
 
 STOPPING AND CLEANUP
 
-Stop orchestrator-owned workers with exact `agent_fleet` operations. `stop` is the unconditional safety action and retains the worker/session record for resume. Use `forget` only after inspecting the handoff and stopped state, with explicit manager `acknowledge: true`. Use exact tmux sessions, sockets, PIDs, or process groups only for intentionally unmanaged legacy workers. Avoid broad `pkill` patterns.
+Stop orchestrator-owned workers with exact `agent_fleet` operations. When a worker's final handoff confirms its assignment is complete and no more work is needed, review it and promptly call `agent_fleet({ action: "stop", id: "<exact worker id>" })`; do not merely reply that it is released or wait for repeated status probes. If more assigned work remains, explicitly assign it instead. Verify the worker is stopped. `stop` is the unconditional safety action and retains the worker/session record for resume. Use `forget` only after inspecting the handoff and stopped state, with explicit manager `acknowledge: true`. Use exact tmux sessions, sockets, PIDs, or process groups only for intentionally unmanaged legacy workers. Avoid broad `pkill` patterns.
 
 After stopping a worker, verify:
 

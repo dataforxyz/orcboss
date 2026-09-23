@@ -121,6 +121,7 @@ export function standingInstructions(
     instructions,
     `Standing assignment: ${task}`,
     communicationInstructions,
+    "When the assignment is complete, send one final handoff that clearly says whether any assigned work remains. After that, wait for a new assignment. On a routine status or lifecycle wake after that handoff, do not repeat its contents; if your harness requires a reply, report only whether anything changed, understanding that this reply still counts as worker activity and the manager should stop or reassign you promptly. The manager owns stopping workers: do not claim you are released/stopped until the manager confirms it, and do not try to stop your own managed unit.",
     "Before promising browser-based validation, screenshots, or saved artifacts, verify that this worker actually has a browser or browser tool, a usable browser executable, and write access to the intended artifact directory. If any requirement is unavailable, report the exact gap immediately and ask the manager to capture locally or re-route the work; never present code inspection as visual evidence.",
     "In a read-only workspace, package runners may fail because they try to write caches or environment metadata even when dependencies already exist. If the repository has a trusted pinned environment and the task does not require dependency synchronization, invoke its existing immutable entry points directly (for example `.venv/bin/python` or `.venv/bin/pytest`) instead of widening permissions. Report that `uv run` was bypassed; never claim it succeeded. If the environment is absent, stale, or would need writes, report the verification as blocked.",
     "Keep downstream tools inside this worker process tree. Do not create detached systemd services, background containers, or remote jobs unless the manager explicitly asks; report every external resource ID so the manager can own its cleanup.",
@@ -144,7 +145,7 @@ export function buildWorkerArgs(input: {
   const { harness, profile, profileName, workerId, cwd, role, task, model, effort, instructions, managerTarget, permissionProfile } = input;
   let args = [...(profile.args ?? [])];
   const communicationInstructions = harness === "claude" && profileName === "claude-minimal"
-    ? "Wait for work through Agent Intercom. Minimal Claude mode does not expose MCP tools such as intercom_send; put progress, blockers, status, and completion evidence in the final response to each wake so the bridge can relay it to the manager. Do not claim that you called an unavailable Intercom tool."
+    ? "Wait for work through Agent Intercom. Minimal Claude mode does not expose MCP tools such as intercom_send; put new progress, blockers, status, and the first final handoff in the final response to each wake so the bridge can relay it to the manager. This profile cannot make an unchanged wake response silent: if the final handoff was already sent and nothing changed, keep the required final response to a one-line no-change status. It is still relayed as activity, so the manager must stop or reassign you promptly. Do not repeat handoff details or claim that you called an unavailable Intercom tool."
     : undefined;
   const mandate = standingInstructions(role, task, managerTarget, instructions, communicationInstructions);
 

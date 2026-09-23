@@ -306,8 +306,8 @@ function statusProbeMessage(worker: WorkerRecord, config: OrchestratorConfig): s
   const attempt = worker.statusProbeAttemptCount ?? 1;
   return [
     `Status check ${attempt}/${config.statusProbeMaxAttempts} for ${worker.id}.`,
-    "If the assignment is complete, send your final handoff to the manager now. If you are still working, send concise progress and an ETA; if blocked, send the blocker.",
-    "This manager-initiated check does not renew your lease. Only your response records activity.",
+    "If the assignment is complete and you have not already sent a final handoff, send it once and state whether any assigned work remains. If the assignment is complete, you already sent a final handoff, and nothing has materially changed, do not repeat its contents; the manager has the handoff and should stop you or assign new work. If material status changed or you received a new assignment, send an updated handoff for the current assignment. If you are still working, send concise progress and an ETA; if blocked, send the blocker.",
+    "A reply to this manager-initiated check records worker activity and advances the idle deadline. If your harness requires a reply after an unchanged final handoff, keep it to a one-line 'no change' rather than repeating the handoff details; the manager should stop or reassign you promptly.",
   ].join("\n");
 }
 
@@ -315,7 +315,8 @@ function checkpointMessage(worker: WorkerRecord, config: OrchestratorConfig): st
   return [
     `Lifecycle checkpoint requested for ${worker.id}.`,
     `Your idle deadline is ${formatTime(worker.idleDeadlineAt!)}; the exact worker unit may be stopped after a ${config.cleanupGraceMinutes}-minute grace period.`,
-    "Stop beginning new work. Save or commit current changes, report the current commit/worktree status and tests, then send a final handoff to your manager.",
+    "Stop beginning new work. Save or commit current changes, report the current commit/worktree status and tests, and send a final handoff for the current assignment if one has not already been sent or if material status has changed.",
+    "If your final handoff was already sent and nothing has materially changed, do not repeat it; the manager should stop you or explicitly assign further work.",
     "If continued quiet work is intentional, ask the manager to renew the lease explicitly.",
     "Your worker record and supported harness session state will be retained if the unit is stopped.",
   ].join("\n");
@@ -717,8 +718,9 @@ function fleetPromptGuidelines(config: OrchestratorConfig): string[] {
     "For read-only test or audit assignments, package runners such as `uv run` may attempt cache or environment writes. When a trusted pinned `.venv` already exists and no dependency sync is needed, tell the worker to use direct immutable entry points such as `.venv/bin/python` or `.venv/bin/pytest`, and to disclose the bypass. Do not widen permissions or claim the package runner passed; if the pinned environment is missing or stale, report the test blocked.",
     `When the caller did not explicitly choose routing fields, pass harness=auto, effort=auto, and subagents=auto (or omit them when the client preserves optional fields); never invent pi/off/false placeholders. Capability-aware routing then chooses an installed eligible harness. Use action=route with the same explicit constraints to preview the selection. Explicit harness/profile choices always win; explicit model identifiers use the configured model-routing rules and unmatched-model harness.${explicitOnly}`,
     "Delegation is optional and never inferred. Strict-schema callers must pass delegationGrant=null when no Controller-issued root delegation is requested; never manufacture an empty or placeholder grant.",
+    "When a worker sends a final handoff that confirms its assignment is complete and no more work is needed, review the handoff and promptly stop that exact owned worker with agent_fleet({ action: \"stop\", id: \"<exact worker id>\" }); do not merely reply that it is released. Verify the stopped state. If more work remains, explicitly assign it instead. Do not stop workers based on progress, blockers, or ambiguous completion wording.",
     "Preview update and cleanup before execute=true. Updates preserve detected install sources; never kill sessions the fleet does not own.",
-    "Persistent workers expire after an activity-bounded idle budget. Worker messages to the manager or explicit renew extend it; manager heartbeat alone does not. Default list output hides older terminal history; use history when needed. Stop completed workers promptly, rely on configured retention cleanup, and use forget or bulk prune with acknowledge=true only after deliberate closure.",
+    "Persistent workers expire after an activity-bounded idle budget. Worker messages to the manager or explicit renew extend it; manager heartbeat alone does not. Manager-initiated status and checkpoint replies also count as activity, so handle a final handoff promptly rather than waiting for repeated probes. Default list output hides older terminal history; use history when needed. Stop completed workers promptly, rely on configured retention cleanup, and use forget or bulk prune with acknowledge=true only after deliberate closure.",
   ];
 }
 

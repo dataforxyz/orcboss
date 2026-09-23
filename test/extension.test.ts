@@ -2096,6 +2096,8 @@ test("extension registers discovery tools and interactive configuration commands
     assert.match(bossStatus.content[0].text, /No Boss runs are owned by this Controller/);
     assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /returned intercomTarget/);
     assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /progress\/status checkpoints/);
+    assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /final handoff.*promptly stop that exact owned worker/i);
+    assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /status and checkpoint replies also count as activity/i);
     assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /create the feature worktree before spawning/i);
     assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /browser automation, screenshot capture, and artifact write access/i);
     assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /explicit executablePath/);

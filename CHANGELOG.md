@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reduce repeated completion handoff content and direct managers to stop completed owned workers promptly; clarify that replies to status/checkpoint probes can still renew worker activity.
 - Wake silent workers early with durable, bounded status probes that request a final handoff, progress/ETA, or blocker without renewing the worker lease; configurable defaults probe after 10 minutes, retry every 10 minutes, and stop after two requests.
 - Preserve persistent worker lifecycle budgets across laptop suspend by comparing persisted wall-clock and Linux monotonic-clock samples, rebasing only live-worker idle, lease, and checkpoint timers after wake while leaving terminal retention on wall time.
 - Discover Pi models through the same verified manager runtime used for Pi workers, avoiding stale or incompatible `pi-peer` wrapper binaries; extend model catalog caches from five minutes to one day.
